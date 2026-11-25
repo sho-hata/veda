@@ -59,6 +59,12 @@ final class TransAmSettings {
         didSet { onVisualChange?() }
     }
 
+    /// 他アプリ用の残像生成間隔（ミリ秒）
+    /// 60Hz ポーリング（16.67ms 周期）上で 4 tick（約 66.7ms）ごとに安定発火させ、Veda 本体の残像感に揃える
+    var externalSpawnIntervalMs: Double = 58.0 {
+        didSet { onVisualChange?() }
+    }
+
     /// 発光強度: 0.2 〜 1.5
     var glowIntensity: Double = 0.85 {
         didSet { onVisualChange?() }
@@ -67,8 +73,14 @@ final class TransAmSettings {
     /// 残像を生成する最低移動距離（pt）
     let minimumMoveDistance: CGFloat = 10.0
 
+    /// 他アプリ用の残像を生成する最低移動距離（pt）
+    let externalMinimumMoveDistance: CGFloat = 28.0
+
     /// 縮小時に残像を生成する最低サイズ変化量（pt）
     let minimumShrinkDelta: CGFloat = 8.0
+
+    /// 他アプリ用の縮小時に残像を生成する最低サイズ変化量（pt）
+    let externalMinimumShrinkDelta: CGFloat = 18.0
 
     /// 現在オーバーレイ上に存在する残像レイヤー数（デバッグ・確認用）
     var activeAfterimageCount: Int = 0
@@ -83,6 +95,10 @@ final class TransAmSettings {
 
     var spawnIntervalSeconds: TimeInterval {
         spawnIntervalMs / 1000.0
+    }
+
+    var externalSpawnIntervalSeconds: TimeInterval {
+        externalSpawnIntervalMs / 1000.0
     }
 
     func activateTransAm() {

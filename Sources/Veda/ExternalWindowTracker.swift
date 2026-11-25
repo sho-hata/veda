@@ -303,8 +303,8 @@ final class ExternalWindowTracker {
 
             if isActiveDraggedWindow
                 && sizeUnchanged
-                && distance >= settings.minimumMoveDistance
-                && (now - state.lastSpawnTime) >= settings.spawnIntervalSeconds {
+                && distance >= settings.externalMinimumMoveDistance
+                && (now - state.lastSpawnTime) >= settings.externalSpawnIntervalSeconds {
 
                 let targetScreen = screenContaining(rect: state.lastSpawnBounds)
                 let scale = max(1.0, targetScreen?.backingScaleFactor ?? 2.0)
@@ -343,7 +343,7 @@ final class ExternalWindowTracker {
                 if !isSystemWideTransition
                     && now >= suppressUntil
                     && areaShrank
-                    && shrinkDelta >= settings.minimumShrinkDelta {
+                    && shrinkDelta >= settings.externalMinimumShrinkDelta {
                     let targetScreen = screenContaining(rect: state.lastSpawnBounds)
                     let scale = max(1.0, targetScreen?.backingScaleFactor ?? 2.0)
 
@@ -358,7 +358,7 @@ final class ExternalWindowTracker {
                                 glowIntensity: settings.glowIntensity
                             )
                         }
-                        if (now - state.lastSpawnTime) >= settings.spawnIntervalSeconds {
+                        if (now - state.lastSpawnTime) >= settings.externalSpawnIntervalSeconds {
                             overlayManager.spawnExternalAfterimage(
                                 screenRect: state.lastSpawnBounds,
                                 targetWindowNumber: Int(wid),
