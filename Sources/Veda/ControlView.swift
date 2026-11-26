@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ControlView: View {
     let settings: TransAmSettings
+    let onOpenSetup: () -> Void
 
     private var isTransAmLit: Bool {
         settings.isEnabled || settings.isActivating
@@ -11,6 +12,10 @@ struct ControlView: View {
         isTransAmLit
             ? Color(red: 1.0, green: 0.14, blue: 0.70)
             : Color(red: 0.30, green: 0.96, blue: 0.34)
+    }
+
+    private var needsSetupBadge: Bool {
+        !settings.isScreenCaptureReady || AppInstallHelper.currentInstallState().requiresInstallAttention
     }
 
     var body: some View {
@@ -34,6 +39,41 @@ struct ControlView: View {
             .padding(.top, 26)
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
+
+            if needsSetupBadge {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button(action: onOpenSetup) {
+                            HStack(spacing: 5) {
+                                Image(systemName: AppInstallHelper.currentInstallState().requiresInstallAttention ? "arrow.down.app" : "lock.shield")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text(
+                                    AppInstallHelper.currentInstallState().requiresInstallAttention
+                                        ? "インストール"
+                                        : "画面収録"
+                                )
+                                .font(.system(size: 10.5, weight: .semibold))
+                            }
+                            .foregroundStyle(.white.opacity(0.90))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3.5)
+                            .background(
+                                accentColor.opacity(0.20),
+                                in: Capsule()
+                            )
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(accentColor.opacity(0.55), lineWidth: 0.8)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 6)
+                        .padding(.trailing, 12)
+                    }
+                    Spacer()
+                }
+            }
         }
         .frame(minWidth: 440, maxWidth: .infinity, minHeight: 260, maxHeight: .infinity)
         .preferredColorScheme(.dark)

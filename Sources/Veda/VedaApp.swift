@@ -17,6 +17,7 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
     )
 
     private var mainWindow: NSWindow?
+    private var onboardingWindow: NSWindow?
 
     static func main() {
         let app = NSApplication.shared
@@ -50,12 +51,18 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
 
         overlayManager.attach(to: window)
         externalWindowTracker.syncRunningState()
-        print("Veda launched: window=\(window.frame) scale=\(window.backingScaleFactor) screenCapture=\(settings.hasScreenCapturePermission)")
+
+        if shouldShowOnboardingOnLaunch() {
+            presentOnboardingWindow()
+        }
+
+        print("Veda launched: window=\(window.frame) scale=\(window.backingScaleFactor) screenCapture=\(settings.hasScreenCapturePermission) install=\(AppInstallHelper.currentInstallState())")
         fflush(stdout)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         settings.refreshScreenCapturePermission()
+        settings.triggerAutoDirectCaptureAuthIfNeeded()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -68,7 +75,12 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
     }
 
     private func createMainWindow() -> NSWindow {
-        let contentView = ControlView(settings: settings)
+        let contentView = ControlView(
+            settings: settings,
+            onOpenSetup: { [weak self] in
+                self?.presentOnboardingWindow()
+            }
+        )
         let hostingView = NSHostingView(rootView: contentView)
 
         let window = NSWindow(
@@ -84,9 +96,77 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
         window.isMovableByWindowBackground = true
         window.isRestorable = false
         window.collectionBehavior = [.moveToActiveSpace]
-        window.backgroundColor = NSColor(calibratedRed: 0.02, green: 0.01, blue: 0.04, alpha: 1.0)
+        window.backgroundColor = NSColor(calibratedRed: 0.008, green: 0.025, blue: 0.016, alpha: 1.0)
         window.contentView = hostingView
         return window
+    }
+
+    private func shouldShowOnboardingOnLaunch() -> Bool {
+        let installState = AppInstallHelper.currentInstallState()
+        if installState.requiresInstallAttention {
+            return true
+        }
+        if !settings.hasCompletedOnboarding {
+            return true
+        }
+        return false
+    }
+
+    private func presentOnboardingWindow() {
+        if let existing = onboardingWindow {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+            return
+        }
+
+        let onboardingView = OnboardingView(
+            settings: settings,
+            onContinue: { [weak self] in
+                self?.closeOnboardingWindow()
+            }
+        )
+        let hostingView = NSHostingView(rootView: onboardingView)
+
+        let showInstallStep = !AppInstallHelper.currentInstallState().isInstalled
+        let onboardingHeight: CGFloat = showInstallStep ? 354 : 256
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: onboardingHeight),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Veda"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = false
+        window.level = .floating
+        window.isRestorable = false
+        window.isReleasedWhenClosed = false
+        window.backgroundColor = NSColor(calibratedRed: 0.012, green: 0.042, blue: 0.028, alpha: 1.0)
+        window.contentView = hostingView
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.onboardingWindow = nil
+            }
+        }
+
+        self.onboardingWindow = window
+    }
+
+    private func closeOnboardingWindow() {
+        onboardingWindow?.close()
+        onboardingWindow = nil
+        mainWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate()
     }
 
     private func setupMainMenu() {
@@ -95,6 +175,22 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
         mainMenu.addItem(appMenuItem)
 
         let appMenu = NSMenu()
+        let setupItem = NSMenuItem(
+            title: "初期セットアップ / 権限設定...",
+            action: #selector(openOnboardingMenu(_:)),
+            keyEquivalent: ","
+        )
+        setupItem.target = self
+        appMenu.addItem(setupItem)
+
+        let installItem = NSMenuItem(
+            title: "Applications へインストール...",
+            action: #selector(installToApplicationsMenu(_:)),
+            keyEquivalent: ""
+        )
+        installItem.target = self
+        appMenu.addItem(installItem)
+
         let screenCaptureItem = NSMenuItem(
             title: "実画面を許可",
             action: #selector(requestScreenCapturePermission(_:)),
@@ -112,6 +208,22 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
         NSApp.mainMenu = mainMenu
     }
 
+    @objc private func openOnboardingMenu(_ sender: Any?) {
+        presentOnboardingWindow()
+    }
+
+    @objc private func installToApplicationsMenu(_ sender: Any?) {
+        do {
+            let destinationURL = try AppInstallHelper.copyToApplications()
+            GNParticleRingEffectController.play(centeredOn: onboardingWindow ?? mainWindow) {
+                AppInstallHelper.launchInstalledAppAndTerminate(at: destinationURL)
+            }
+        } catch {
+            let alert = NSAlert(error: error)
+            alert.runModal()
+        }
+    }
+
     @objc private func requestScreenCapturePermission(_ sender: Any?) {
         settings.requestScreenCapturePermission()
     }
@@ -119,9 +231,14 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(requestScreenCapturePermission(_:)) {
             settings.refreshScreenCapturePermission()
-            let granted = settings.hasScreenCapturePermission
-            menuItem.state = granted ? .on : .off
-            return !granted
+            let ready = settings.isScreenCaptureReady
+            menuItem.state = ready ? .on : .off
+            return !ready
+        }
+        if menuItem.action == #selector(installToApplicationsMenu(_:)) {
+            let state = AppInstallHelper.currentInstallState()
+            menuItem.state = state.isInstalled ? .on : .off
+            return AppInstallHelper.isAppBundle && !state.isInstalled
         }
         return true
     }

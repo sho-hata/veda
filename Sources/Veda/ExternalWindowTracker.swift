@@ -460,7 +460,7 @@ final class ExternalWindowTracker {
         // 他アプリのウィンドウ枠をほのかに赤く発光させつつ、ドラッグ中でない時に最前面ウィンドウの実画面キャッシュを事前ウォーム
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if !isMouseDown,
-           settings.hasScreenCapturePermission,
+           settings.isScreenCaptureReady,
            let frontmostPID,
            (now - lastPrewarmTime) >= 0.50,
            let frontmostWindow = currentWindows.first(where: { $0.ownerPID == frontmostPID }) {
@@ -651,7 +651,7 @@ final class ExternalWindowTracker {
         scale: CGFloat,
         glowIntensity: Double
     ) {
-        guard settings.hasScreenCapturePermission else { return }
+        guard settings.isScreenCaptureReady else { return }
         guard !capturingWindowIDs.contains(windowID) else { return }
 
         capturingWindowIDs.insert(windowID)
@@ -690,13 +690,14 @@ final class ExternalWindowTracker {
                     capturedAt: CACurrentMediaTime()
                 )
             } catch {
-                // 権限が取り消された場合などは静かにシルエットモードへフォールバック
-                self.settings.refreshScreenCapturePermission()
+                // 権限が取り消された・バイパス許可が未承認または期限切れの場合は再許可待ちへ戻し連打を防ぐ
+                self.handleCaptureError(error)
             }
         }
     }
 
     private func resolveSCWindow(for windowID: CGWindowID) async -> SCWindow? {
+        guard settings.isScreenCaptureReady else { return nil }
         let now = CACurrentMediaTime()
         if let existing = scWindowMap[windowID], (now - lastSCMapRefresh) < scMapTTL {
             return existing
@@ -722,8 +723,22 @@ final class ExternalWindowTracker {
             lastSCMapRefresh = CACurrentMediaTime()
             return updated[windowID]
         } catch {
-            settings.refreshScreenCapturePermission()
+            handleCaptureError(error)
             return nil
         }
+    }
+
+    private func handleCaptureError(_ error: Error) {
+        let nsError = error as NSError
+        // SCStreamError.userDeclined (-3801) や TCC 権限エラー時は再許可が必要な状態へ遷移させる
+        if nsError.domain == SCStreamErrorDomain && nsError.code == SCStreamError.userDeclined.rawValue {
+            settings.markDirectCaptureNeedsAuthorization()
+            return
+        }
+        if !CGPreflightScreenCaptureAccess() {
+            settings.markDirectCaptureNeedsAuthorization()
+            return
+        }
+        settings.refreshScreenCapturePermission()
     }
 }

@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import Observation
+import ScreenCaptureKit
 
 @MainActor
 @Observable
@@ -46,8 +47,34 @@ final class TransAmSettings {
         }
     }
 
-    /// 画面収録権限が付与されているか（true なら他アプリも実画面キャプチャ、false なら発光シルエット残像）
+    /// 画面収録権限（システム設定のトグル）が付与されているか
     var hasScreenCapturePermission: Bool = false
+
+    /// ScreenCaptureKit の直接アクセス許可（macOS 15+ のプライベートウィンドウピッカーバイパス許可ダイアログ）まで承認済みか
+    var isDirectCaptureAuthorized: Bool = false
+
+    /// 現在、直接アクセス許可ダイアログの応答待ちか
+    var isRequestingScreenCapture: Bool = false
+
+    /// このセッション中にシステム設定の画面収録ペインを開いたか（再起動ボタン表示用）
+    var hasRequestedScreenCaptureInSession: Bool = false
+
+    /// このセッション中に直接アクセス許可の自動プロンプトを既に試行したか（キャンセル時の無限ループ防止）
+    var hasAutoAttemptedDirectAuthInSession: Bool = false
+
+    /// 実画面キャプチャ（他アプリのトランザム実画面残像）が即座に使える完全許可状態か
+    var isScreenCaptureReady: Bool {
+        hasScreenCapturePermission && isDirectCaptureAuthorized
+    }
+
+    /// 初回セットアップ（オンボーディング）を完了したか
+    private static let onboardingCompletedKey = "com.sho-hata.veda.onboardingCompleted.v1"
+    private static let directCaptureAuthorizedKey = "com.sho-hata.veda.directCaptureAuthorized.v1"
+
+    var hasCompletedOnboarding: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.onboardingCompletedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.onboardingCompletedKey) }
+    }
 
     /// 残像の持続時間（秒）: 0.2s 〜 1.2s
     var fadeDuration: Double = 0.42 {
@@ -116,15 +143,80 @@ final class TransAmSettings {
     }
 
     func refreshScreenCapturePermission() {
-        hasScreenCapturePermission = CGPreflightScreenCaptureAccess()
+        let granted = CGPreflightScreenCaptureAccess()
+        hasScreenCapturePermission = granted
+        if granted {
+            if UserDefaults.standard.bool(forKey: Self.directCaptureAuthorizedKey) {
+                isDirectCaptureAuthorized = true
+            }
+        } else {
+            isDirectCaptureAuthorized = false
+            UserDefaults.standard.set(false, forKey: Self.directCaptureAuthorizedKey)
+        }
     }
 
+    /// システム設定の画面収録トグルを促す（未許可時）
     func requestScreenCapturePermission() {
+        hasRequestedScreenCaptureInSession = true
         let granted = CGRequestScreenCaptureAccess()
         hasScreenCapturePermission = granted
-        if !granted,
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
+        if granted {
+            Task { @MainActor in
+                await authorizeDirectScreenCapture()
+            }
+            return
         }
+        // システムの初回ダイアログとフォーカスが競合しないよう少しずらして確実に「画面収録」リストを開く
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            AppInstallHelper.openScreenCaptureSettings()
+        }
+    }
+
+    /// macOS 15+ の ScreenCaptureKit 直接アクセス許可ダイアログ（「許可」/「システム設定を開く」）を
+    /// セットアップ内で明示的に発火・ハンドリングし、承認完了を確定する。
+    func authorizeDirectScreenCapture() async {
+        guard !isRequestingScreenCapture else { return }
+        isRequestingScreenCapture = true
+        defer { isRequestingScreenCapture = false }
+
+        do {
+            _ = try await SCShareableContent.excludingDesktopWindows(
+                true,
+                onScreenWindowsOnly: true
+            )
+            hasScreenCapturePermission = true
+            isDirectCaptureAuthorized = true
+            UserDefaults.standard.set(true, forKey: Self.directCaptureAuthorizedKey)
+        } catch {
+            hasRequestedScreenCaptureInSession = true
+            isDirectCaptureAuthorized = false
+            UserDefaults.standard.set(false, forKey: Self.directCaptureAuthorizedKey)
+            hasScreenCapturePermission = CGPreflightScreenCaptureAccess()
+        }
+    }
+
+    /// システム設定トグルが ON になった直後（再起動直後やアプリ復帰時）に、
+    /// ユーザーが押し忘れないよう直接アクセス許可ダイアログを自動で 1 回だけ発火する。
+    func triggerAutoDirectCaptureAuthIfNeeded() {
+        guard hasScreenCapturePermission,
+              !isDirectCaptureAuthorized,
+              !isRequestingScreenCapture,
+              !hasAutoAttemptedDirectAuthInSession else {
+            return
+        }
+        hasAutoAttemptedDirectAuthInSession = true
+        Task { @MainActor in
+            // ウィンドウ表示直後のフォーカス安定をわずかに待ってから表示
+            try? await Task.sleep(for: .milliseconds(250))
+            await authorizeDirectScreenCapture()
+        }
+    }
+
+    /// 実行中に権限が拒否・失効（月次再確認など）されたときに再許可待ちへ戻し、バックグラウンド連打を防ぐ。
+    func markDirectCaptureNeedsAuthorization() {
+        isDirectCaptureAuthorized = false
+        UserDefaults.standard.set(false, forKey: Self.directCaptureAuthorizedKey)
+        hasScreenCapturePermission = CGPreflightScreenCaptureAccess()
     }
 }
