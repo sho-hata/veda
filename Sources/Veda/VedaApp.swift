@@ -84,7 +84,7 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
         let hostingView = NSHostingView(rootView: contentView)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 350),
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 508),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false

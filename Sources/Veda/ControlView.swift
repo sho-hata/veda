@@ -51,7 +51,7 @@ struct ControlView: View {
                                 Text(
                                     AppInstallHelper.currentInstallState().requiresInstallAttention
                                         ? "インストール"
-                                        : "画面収録"
+                                        : "Enable Trans-Am Effect"
                                 )
                                 .font(.system(size: 10.5, weight: .semibold))
                             }
