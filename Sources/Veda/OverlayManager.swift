@@ -6,6 +6,8 @@ final class OverlayManager {
     private weak var mainWindow: NSWindow?
     private let settings: TransAmSettings
     private let snapshotRenderer: SnapshotRenderer
+    private let missionControlMonitor: MissionControlMonitor
+    private var missionControlObserverToken: UUID?
 
     private var overlayWindow: NSWindow?
     private var rootLayer: CALayer?
@@ -24,9 +26,14 @@ final class OverlayManager {
     /// 仮想デスクトップ切替直後のシステムアニメーションによる誤発光を防ぐ抑止時間（秒）
     private let spaceSwitchSuppressionDuration: CFTimeInterval = 0.45
 
-    init(settings: TransAmSettings, snapshotRenderer: SnapshotRenderer) {
+    init(
+        settings: TransAmSettings,
+        snapshotRenderer: SnapshotRenderer,
+        missionControlMonitor: MissionControlMonitor
+    ) {
         self.settings = settings
         self.snapshotRenderer = snapshotRenderer
+        self.missionControlMonitor = missionControlMonitor
     }
 
     func attach(to window: NSWindow) {
@@ -112,6 +119,9 @@ final class OverlayManager {
             name: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil
         )
+        missionControlObserverToken = missionControlMonitor.addObserver { [weak self] isActive in
+            self?.handleMissionControlStateChanged(isActive)
+        }
 
         let initialRect = currentContentRectInScreen(for: window)
         lastSpawnFrame = initialRect
@@ -122,6 +132,10 @@ final class OverlayManager {
     func detach() {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        if let token = missionControlObserverToken {
+            missionControlMonitor.removeObserver(token)
+            missionControlObserverToken = nil
+        }
 
         clearAllEffects()
         overlayWindow = nil
@@ -136,6 +150,7 @@ final class OverlayManager {
     }
 
     func orderOverlayBehindMainWindow(forceOrderIn: Bool = false) {
+        guard !missionControlMonitor.isActive else { return }
         guard let mainWindow, let overlayWindow else { return }
         guard mainWindow.isVisible else { return }
         guard forceOrderIn || !activeLayers.isEmpty else { return }
@@ -170,7 +185,8 @@ final class OverlayManager {
         overlay.backgroundColor = .clear
         overlay.hasShadow = false
         overlay.ignoresMouseEvents = true
-        overlay.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Mission Control（仮想ディスプレイ一覧）表示中はシステム側でも非表示・一覧除外にする
+        overlay.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]
         overlay.level = level
         overlay.animationBehavior = .none
         overlay.isReleasedWhenClosed = false
@@ -228,6 +244,7 @@ final class OverlayManager {
         snapshotImage: CGImage?,
         scale: CGFloat
     ) {
+        guard !missionControlMonitor.isActive else { return }
         guard let overlayWindow else { return }
         guard CACurrentMediaTime() >= suppressAfterimagesUntil else { return }
 
@@ -261,6 +278,7 @@ final class OverlayManager {
         steps: Int = 4
     ) {
         guard settings.isEnabled else { return }
+        guard !missionControlMonitor.isActive else { return }
         guard CACurrentMediaTime() >= suppressAfterimagesUntil else { return }
         guard let overlayWindow else { return }
 
@@ -301,6 +319,7 @@ final class OverlayManager {
                     try? await Task.sleep(for: .milliseconds(delayMs))
                     guard let self,
                           self.settings.isEnabled,
+                          !self.missionControlMonitor.isActive,
                           CACurrentMediaTime() >= self.suppressAfterimagesUntil,
                           let overlayWindow = self.overlayWindow else {
                         return
@@ -367,7 +386,10 @@ final class OverlayManager {
             return
         }
 
+        missionControlMonitor.refreshFromSystemWindowListIfStale()
+
         guard settings.isEnabled,
+              !missionControlMonitor.isActive,
               now >= suppressAfterimagesUntil,
               isPrimaryMouseButtonPressed() else {
             lastSpawnFrame = currentRect
@@ -440,7 +462,10 @@ final class OverlayManager {
         let currentRect = currentContentRectInScreen(for: mainWindow)
         lastObservedSize = currentRect.size
 
+        missionControlMonitor.refreshFromSystemWindowListIfStale()
+
         if settings.isEnabled,
+           !missionControlMonitor.isActive,
            now >= suppressAfterimagesUntil,
            let previousRect = lastSpawnFrame {
             let dw = previousRect.width - currentRect.width
@@ -524,8 +549,12 @@ final class OverlayManager {
             return
         }
 
+        missionControlMonitor.refreshFromSystemWindowListIfStale()
+
         let now = CACurrentMediaTime()
-        guard settings.isEnabled, now >= suppressAfterimagesUntil else {
+        guard settings.isEnabled,
+              !missionControlMonitor.isActive,
+              now >= suppressAfterimagesUntil else {
             clearAllEffects()
             return
         }
@@ -597,6 +626,23 @@ final class OverlayManager {
         clearAllEffects()
         lastSpawnFrame = mainWindow.map { currentContentRectInScreen(for: $0) }
         snapshotRenderer.invalidateCache()
+    }
+
+    private func handleMissionControlStateChanged(_ isActive: Bool) {
+        if isActive {
+            isLiveResizing = false
+            clearAllEffects()
+        } else {
+            suppressAfterimagesUntil = max(
+                suppressAfterimagesUntil,
+                CACurrentMediaTime() + spaceSwitchSuppressionDuration
+            )
+            clearAllEffects()
+            let currentRect = mainWindow.map { currentContentRectInScreen(for: $0) }
+            lastSpawnFrame = currentRect
+            lastObservedSize = currentRect?.size
+            snapshotRenderer.invalidateCache()
+        }
     }
 
     // MARK: - Afterimage Spawning & Lifecycle
@@ -776,7 +822,7 @@ final class OverlayManager {
         hideOverlayIfIdle()
     }
 
-    private func clearAllEffects() {
+    func clearAllEffects() {
         clearAllAfterimages()
         if let sublayers = rootLayer?.sublayers {
             for layer in sublayers {

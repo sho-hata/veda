@@ -6,14 +6,17 @@ import SwiftUI
 final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let settings = TransAmSettings()
     private let snapshotRenderer = SnapshotRenderer()
+    private let missionControlMonitor = MissionControlMonitor()
     private lazy var overlayManager = OverlayManager(
         settings: settings,
-        snapshotRenderer: snapshotRenderer
+        snapshotRenderer: snapshotRenderer,
+        missionControlMonitor: missionControlMonitor
     )
     private lazy var externalWindowTracker = ExternalWindowTracker(
         settings: settings,
         snapshotRenderer: snapshotRenderer,
-        overlayManager: overlayManager
+        overlayManager: overlayManager,
+        missionControlMonitor: missionControlMonitor
     )
 
     private var mainWindow: NSWindow?
@@ -49,6 +52,7 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
         window.orderFrontRegardless()
         NSApp.activate()
 
+        missionControlMonitor.start()
         overlayManager.attach(to: window)
         externalWindowTracker.syncRunningState()
 
@@ -68,6 +72,7 @@ final class VedaAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidati
     func applicationWillTerminate(_ notification: Notification) {
         externalWindowTracker.stop()
         overlayManager.detach()
+        missionControlMonitor.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

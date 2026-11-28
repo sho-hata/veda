@@ -26,7 +26,9 @@ final class ExternalWindowTracker {
     private let settings: TransAmSettings
     private let snapshotRenderer: SnapshotRenderer
     private let borderManager: ExternalWindowBorderManager
+    private let missionControlMonitor: MissionControlMonitor
     private weak var overlayManager: OverlayManager?
+    private var missionControlObserverToken: UUID?
 
     private var pollTimer: Timer?
     private var trackedWindows: [CGWindowID: TrackedWindowState] = [:]
@@ -67,11 +69,13 @@ final class ExternalWindowTracker {
     init(
         settings: TransAmSettings,
         snapshotRenderer: SnapshotRenderer,
-        overlayManager: OverlayManager
+        overlayManager: OverlayManager,
+        missionControlMonitor: MissionControlMonitor
     ) {
         self.settings = settings
         self.snapshotRenderer = snapshotRenderer
         self.borderManager = ExternalWindowBorderManager(settings: settings)
+        self.missionControlMonitor = missionControlMonitor
         self.overlayManager = overlayManager
     }
 
@@ -99,6 +103,9 @@ final class ExternalWindowTracker {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+        missionControlObserverToken = missionControlMonitor.addObserver { [weak self] isActive in
+            self?.handleMissionControlStateChanged(isActive)
+        }
 
         activeDraggedWindowID = nil
         lastMouseLocation = NSEvent.mouseLocation
@@ -123,6 +130,10 @@ final class ExternalWindowTracker {
     func stop() {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         NotificationCenter.default.removeObserver(self)
+        if let token = missionControlObserverToken {
+            missionControlMonitor.removeObserver(token)
+            missionControlObserverToken = nil
+        }
         pollTimer?.invalidate()
         pollTimer = nil
         borderManager.stop()
@@ -167,12 +178,29 @@ final class ExternalWindowTracker {
         seedCurrentWindows()
     }
 
+    private func handleMissionControlStateChanged(_ isActive: Bool) {
+        activeDraggedWindowID = nil
+        nonDraggedBorderSettleUntil.removeAll()
+        borderManager.hideAll()
+
+        if isActive {
+            overlayManager?.clearAllEffects()
+        } else {
+            let now = CACurrentMediaTime()
+            suppressUntil = max(suppressUntil, now + spaceSwitchSuppressionDuration)
+            borderSuppressUntil = max(borderSuppressUntil, now + spaceSwitchSuppressionDuration)
+            scWindowMap.removeAll()
+            lastSCMapRefresh = 0
+            seedCurrentWindows()
+        }
+    }
+
     // MARK: - Window Polling
 
     private func seedCurrentWindows() {
         let now = CACurrentMediaTime()
         trackedWindows.removeAll()
-        for info in fetchExternalWindows() {
+        for info in fetchExternalWindows(now: now) {
             trackedWindows[info.windowID] = TrackedWindowState(
                 lastBounds: info.appKitFrame,
                 lastSpawnBounds: info.appKitFrame,
@@ -206,7 +234,15 @@ final class ExternalWindowTracker {
             activeDraggedWindowID = nil
         }
 
-        let currentWindows = fetchExternalWindows()
+        let currentWindows = fetchExternalWindows(now: now)
+        if missionControlMonitor.isActive {
+            activeDraggedWindowID = nil
+            nonDraggedBorderSettleUntil.removeAll()
+            borderManager.hideAll()
+            overlayManager.clearAllEffects()
+            return
+        }
+
         var seenIDs = Set<CGWindowID>()
 
         // 複数アプリが同時移動・同時リサイズしている場合（仮想デスクトップ切替 / Mission Control / Stage Manager 等）を検出
@@ -547,13 +583,15 @@ final class ExternalWindowTracker {
         let appKitFrame: CGRect
     }
 
-    private func fetchExternalWindows() -> [ExternalWindowInfo] {
+    private func fetchExternalWindows(now: CFTimeInterval = CACurrentMediaTime()) -> [ExternalWindowInfo] {
         guard let rawList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
             return []
         }
+
+        missionControlMonitor.updateWindowListDetection(rawWindowList: rawList, now: now)
 
         // Quartz 座標（主ディスプレイ左上原点・Y下向き）-> AppKit 座標（主ディスプレイ左下原点・Y上向き）
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
